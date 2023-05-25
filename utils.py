@@ -53,7 +53,7 @@ def init_dataloader(image_dataset, batch_size=64, num_workers=8):
 
 
 class ConvResNet(torch.nn.Module):
-    def __init__(self, input_shape, filters) -> None:
+    def __init__(self, input_shape, filters, num_blocks=8) -> None:
         self.input_shape = input_shape
         self.filters = filters
         super().__init__()
@@ -101,7 +101,7 @@ class ConvResNet(torch.nn.Module):
         ))
         
         self.blocks = torch.nn.ModuleList([self.create_block(filters=input_shape[0],out_channels=input_shape[0])
-                                           for _ in range(16)])
+                                           for _ in range(num_blocks)])
         
 
     def create_block(self, filters, out_channels):
@@ -192,8 +192,24 @@ def channel_binary_mask(num_channels, orientation=0):
     return channel_binary_mask.float()
 
 
+def squeeze(x):
+    # squeeze
+    b_size, c, h, w = x.shape
+    x = x.view(b_size, c, h // 2, 2, w // 2, 2)
+    x = x.permute(0, 1, 3, 5, 2, 4)
+    x = x.contiguous().view(b_size, c * 4, h // 2, w // 2)
+    return x
+
+def unsqueeze(z):
+    # unsqueeze
+    b_size, c, h, w = z.shape
+    z = z.view(b_size, c // 4, 2, 2, h, w)
+    z = z.permute(0, 1, 4, 2, 5, 3)
+    z = z.contiguous().view(b_size, c // 4, h * 2, w * 2)
+    return z
+
 class AffineCouplingLayer(torch.nn.Module):
-    def __init__(self, mask_type, mask_orientation, input_shape, num_filters) -> None:
+    def __init__(self,  mask_type, mask_orientation, input_shape, num_filters, num_resnet_blocks=8 ) -> None:
         super().__init__()
         self.mask_type = mask_type
         self.mask_orientation = mask_orientation
@@ -213,7 +229,7 @@ class AffineCouplingLayer(torch.nn.Module):
             )
 
         self.mask = self.mask.to(device)
-        self.nn = ConvResNet(input_shape=self.input_shape, filters=self.num_filters)
+        self.nn = ConvResNet(input_shape=self.input_shape, filters=self.num_filters, num_blocks=num_resnet_blocks)
 
     def forward(self, x):
         masked_x = self.mask * x
@@ -237,34 +253,34 @@ class AffineCouplingLayer(torch.nn.Module):
 
 
 class FinalScale(torch.nn.Module):
-    def __init__(self, base_input_shape=[6, 16, 16]) -> None:
+    def __init__(self, base_input_shape=[6, 16, 16], num_resnet_blocks=8) -> None:
         self.base_input_shape = base_input_shape
         super().__init__()
         self.aff_1 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=0,
             input_shape=self.base_input_shape,
-            num_filters=128,
+            num_filters=128, num_resnet_blocks= num_resnet_blocks
         )
 
         self.aff_2 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=1,
             input_shape=self.base_input_shape,
-            num_filters=128,
+            num_filters=128, num_resnet_blocks= num_resnet_blocks
         )
 
         self.aff_3 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=0,
             input_shape=self.base_input_shape,
-            num_filters=128,
+            num_filters=128, num_resnet_blocks= num_resnet_blocks
         )
         self.aff_4 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=1,
             input_shape=self.base_input_shape,
-            num_filters=128,
+            num_filters=128, num_resnet_blocks= num_resnet_blocks
         )
         self.aff_layers = torch.nn.ModuleList([self.aff_1, self.aff_2, self.aff_3, self.aff_4])
 
@@ -310,7 +326,7 @@ class BatchNormalizationBijector(torch.nn.Module):
 
 
 class Scale(torch.nn.Module):
-    def __init__(self, base_input_shape=[3, 32, 32]) -> None:
+    def __init__(self, base_input_shape=[3, 32, 32], mask_orientation=1,  num_resnet_blocks=8) -> None:
         super().__init__()
         self.base_input_shape = base_input_shape
         self.output_shape = [
@@ -321,44 +337,44 @@ class Scale(torch.nn.Module):
 
         self.aff_1 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
-            mask_orientation=0,
+            mask_orientation=1-mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64,
+            num_filters=64, num_resnet_blocks=num_resnet_blocks
         )
 
         self.aff_2 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
-            mask_orientation=1,
+            mask_orientation=mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64,
+            num_filters=64,num_resnet_blocks=num_resnet_blocks
         )
 
         self.aff_3 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
-            mask_orientation=0,
+            mask_orientation=1-mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64,
+            num_filters=64,num_resnet_blocks=num_resnet_blocks
         )
         self.batch_normalization_bijector_1 = BatchNormalizationBijector(input_shape=base_input_shape)
         self.aff_4 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
-            mask_orientation=0,
+            mask_orientation=1-mask_orientation,
             input_shape=self.output_shape,
-            num_filters=128,
+            num_filters=128,num_resnet_blocks=num_resnet_blocks
         )
 
         self.aff_5 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
-            mask_orientation=1,
+            mask_orientation=mask_orientation,
             input_shape=self.output_shape,
-            num_filters=128,
+            num_filters=128,num_resnet_blocks=num_resnet_blocks
         )
 
         self.aff_6 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
-            mask_orientation=0,
+            mask_orientation=1-mask_orientation,
             input_shape=self.output_shape,
-            num_filters=128,
+            num_filters=128,num_resnet_blocks=num_resnet_blocks
         )
         self.batch_normalization_bijector_2 = BatchNormalizationBijector(input_shape=self.output_shape)
         
@@ -367,16 +383,12 @@ class Scale(torch.nn.Module):
 
     def forward(self, x):
         total_logdet = 0
-        b_size, c, h, w = x.shape
         for transformer in self.first_half_transformers:
             x, logdet = transformer(x)
             # print("done first")
             total_logdet += logdet
 
-        # squeeze
-        x = x.view(b_size, c, h // 2, 2, w // 2, 2)
-        x = x.permute(0, 1, 3, 5, 2, 4)
-        x = x.contiguous().view(b_size, c * 4, h // 2, w // 2)
+        x = squeeze(x)
 
         for transformer in self.second_half_transformers:
             # print( x.shape, self.output_shape)
@@ -387,13 +399,10 @@ class Scale(torch.nn.Module):
         return x, total_logdet
 
     def reverse(self, z):
-        b_size, c, h, w = z.shape
         for transformer in self.second_half_transformers[::-1]:
             z = transformer.reverse(z)
-        # unsqueeze
-        z = z.view(b_size, c // 4, 2, 2, h, w)
-        z = z.permute(0, 1, 4, 2, 5, 3)
-        z = z.contiguous().view(b_size, c // 4, h * 2, w * 2)
+
+        z = unsqueeze(z)
 
         for transformer in self.first_half_transformers[::-1]:
             z = transformer.reverse(z)
@@ -402,27 +411,43 @@ class Scale(torch.nn.Module):
 
 
 class RealNVP(torch.nn.Module):
-    def __init__(self, n_bins=256, n_pixels=3 * 32 * 32) -> None:
+    def __init__(self, n_bins=256,base_input_shape=[3, 32, 32],
+                 num_scales=2,
+                 num_resnet_blocks=8) -> None:
         super().__init__()
-        self.scale = Scale()
-        self.final_scale = FinalScale()
+        c, h, w = base_input_shape
+        self.scales = torch.nn.ModuleList([Scale(base_input_shape=[c* 2**i, h//2**i, w//2**i], # after each scale h and w area halved and added to channel, half of the channel is truncated before the next scale hence c * 2^i rather (c * 2 ^(2i))
+                                                 mask_orientation= i%2,
+                                                 num_resnet_blocks=num_resnet_blocks) 
+                                           for i in range(num_scales)])
+        self.final_scale = FinalScale(base_input_shape=[c* 2**(num_scales),
+                                                        h//2**(num_scales),
+                                                        w//2**(num_scales)]) # the shape of this depends on howmany splits we are going to have
 
         self.normal = Normal(0.0, 1.0)
-        self.n_pixels = n_pixels
+        self.n_pixels = c * h * w
         self.n_bins = n_bins
-
+    
     def forward(self, x):
+        x_splits = []
         total_logdet = 0
-
-        x, logdet = self.scale(x)
-        total_logdet += logdet
-
-        # split
-        x, z = torch.chunk(x, chunks=2, dim=1)
+        
+        for scale in self.scales:
+            x, logdet = scale(x) # x will be squeezed as the outcome of this e.g 3, 32, 32 --> 12, 16, 16 
+            total_logdet += logdet
+            
+            # split
+            x, z = torch.chunk(x, chunks=2, dim=1) # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
+            x_splits.append(z)
+         
         x, logdet = self.final_scale(x)
         total_logdet += logdet
-
-        x = torch.concat([x, z], dim=1)
+        # unsqueeze to get back to original shape
+        #print("-----")
+        for split in x_splits[::-1]:
+            x = torch.concat([x, split], dim=1)
+            x = unsqueeze(x)
+        
         z_log_prob = torch.sum(self.normal.log_prob(x), dim=[1, 2, 3])
         log_prob = z_log_prob + total_logdet
 
@@ -432,14 +457,16 @@ class RealNVP(torch.nn.Module):
         return x, final_loss
 
     def reverse(self, z):
-        z, x = torch.chunk(z, chunks=2, dim=1)
         z = self.final_scale.reverse(z)
-        z = torch.concat([z, x], dim=1)
-        z = self.scale.reverse(z)
+        for scale in self.scales[::-1]:
+            # sample from a normal
+            x = self.normal.sample(sample_shape=z.shape).to(device)
+            z = torch.concat([z, x], dim=1)
+            z = scale.reverse(z)
         return z
 
     def sample(self, num_samples=1):
-        num_channels = self.final_scale.base_input_shape[0] * 2
+        num_channels = self.final_scale.base_input_shape[0] 
         height, width = self.final_scale.base_input_shape[1:]
         sample_size = [num_samples, num_channels, height, width]
         z_samples = self.normal.sample(sample_shape=sample_size).to(device)
