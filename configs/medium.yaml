@@ -1,0 +1,19 @@
+
+model_params:
+  num_resnet_blocks: 16
+  num_scales: 2 #L split happens after each scale
+  num_step_of_flow: 2 # K each flow step has 6 affine coupling layers
+
+train_params:
+  lr: 1.e-3
+  batch_size: 128
+  epochs: 100
+  model_checkpoint_path: "./model_checkpoints"
+  dataset_path: "/home/ext_amin_unity3d_com/real_nvp_data/train"
+
+
+sampling_params:
+  num_samples_nrow: 5
+  num_samples_ncols: 5
+  generate_fixed_images: True
+  samples_output_path: ./samples/2_scales_12_affinelayers_16_resnetblocks
