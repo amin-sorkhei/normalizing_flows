@@ -6,14 +6,17 @@ model_params:
 
 train_params:
   lr: 1.e-3
-  batch_size: 128
   epochs: 100
-  model_checkpoint_path: "./model_checkpoints"
-  dataset_path: "/home/ext_amin_unity3d_com/real_nvp_data/train"
+  model_checkpoint_path: "./model_checkpoints/"
 
+data_params:
+  num_samples: -1
+  batch_size: 128
+  num_workers: 8
+  dataset_name: lsun_bedroom # CelebA or lsun_bedroom
 
 sampling_params:
   num_samples_nrow: 5
   num_samples_ncols: 5
   generate_fixed_images: True
-  samples_output_path: ./samples/2_scales_12_affinelayers_16_resnetblocks
+  samples_output_path: ./samples/lsun_bedroom_64*64_2_scales_12_affinelayers_16_resnetblocks

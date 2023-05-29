@@ -1,41 +1,53 @@
-from torch.utils.data import Dataset, DataLoader
 import torch
 import os
 import glob
-from PIL import Image
-from torchvision.transforms import Resize, RandomHorizontalFlip, ToTensor, Compose
 from torch.distributions.normal import Normal
 from math import log
 from types import SimpleNamespace
 from typing import Any
 import matplotlib.pyplot as plt
-import warnings
 import logging
+import datetime
+
 logger = logging.getLogger()
+
+
+def time_now_to_str():
+    time_now = datetime.datetime.utcnow()
+    time_now_str = datetime.datetime.strftime(time_now, format="%Y%m%d_%H%M%S")
+    return time_now_str
 
 
 class RecNameSpace(SimpleNamespace):
     def __init__(self, **kwargs: Any) -> None:
-        nameSpaced = {k: RecNameSpace(**v) if isinstance(v, dict) else v for k,v in kwargs.items()}
-        super().__init__(**nameSpaced)  
+        nameSpaced = {
+            k: RecNameSpace(**v) if isinstance(v, dict) else v
+            for k, v in kwargs.items()
+        }
+        super().__init__(**nameSpaced)
 
 
 def check_point_model(model, epoch, optimizer, loss, path):
-    torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss,
-            }, path + "/" + "best_model.pt")
+    ckpt_path = os.path.join(path, f"best_model_{epoch}_{time_now_to_str()}.pt")
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": loss,
+        },
+        ckpt_path,
+    )
+
 
 def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False):
-    logger.setLevel(logging.ERROR) # to avoid plt warnings about values out of range
+    logger.setLevel(logging.ERROR)  # to avoid plt warnings about values out of range
     fig, ax = plt.subplots(n_row, n_column, squeeze=True)
-    fig.subplots_adjust(wspace=.02, hspace=.02)
+    fig.subplots_adjust(wspace=0.02, hspace=0.02)
     for i in range(0, n_row):
-        for j in range (0, n_column):
+        for j in range(0, n_column):
             ax[i, j].axis("off")
-            image = (generated_image[i, j].permute([1, 2, 0]).detach().cpu().numpy())
+            image = generated_image[i, j].permute([1, 2, 0]).detach().cpu().numpy()
             _ = ax[i, j].imshow(image, aspect="auto")
     plt.suptitle(f"generated_plot epoch {epoch}")
     # TODO: the following 2 lines can be re-written
@@ -44,48 +56,25 @@ def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False):
     else:
         fig.savefig(os.path.join(path, f"generated_image_epoch_{epoch}.png"))
     logger.setLevel(logging.INFO)
-    plt.close("all") # close all figures to avoid memory consumption
-    
-    
-def files_with_suffix(directory, suffix, pure=False):
-    files = [
-        os.path.abspath(path)
-        for path in glob.glob(
-            os.path.join(directory, "**", f"*{suffix}"), recursive=True
-        )
-    ]  # full paths
-    if pure:
-        files = [os.path.split(file)[-1] for file in files]
-    return files
+    plt.close("all")  # close all figures to avoid memory consumption
 
 
-class ImageDataset(Dataset):
-    def __init__(self, root_dir, suffix="jpg") -> None:
-        self.root_dir = root_dir
-        self.files_list = files_with_suffix(self.root_dir, suffix=suffix)
-        super().__init__()
-
-    def get_trans_list(self):
-        transform_list = []
-        transform_list.append(Resize((32, 32)))
-        transform_list.append(RandomHorizontalFlip(p=0.5))
-        transform_list.append(ToTensor())
-        return Compose(transforms=transform_list)
-
-    def __len__(self):
-        return len(self.files_list)
-
-    def __getitem__(self, idx):
-        image = Image.open(self.files_list[idx])
-        tensor_image = self.get_trans_list()(img=image)
-        return tensor_image
-
-
-def init_dataloader(image_dataset, batch_size=64, num_workers=8):
-    image_loader = DataLoader(
-        image_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True
+def create_deterministic_sample(sampling_params, input_shape, seed=42):
+    n_row, n_column = (
+        sampling_params.num_samples_nrow,
+        sampling_params.num_samples_ncols,
     )
-    return image_loader
+    # n_channels, h, w = realnvp.final_scale.base_input_shape
+    n_channels, h, w = input_shape
+    z_base_sample_shape = [n_row * n_column, n_channels, h, w]
+
+    # if sampling_params.generate_fixed_images is True:
+    torch.manual_seed(seed)
+    z_base_sample = torch.distributions.Normal(0, 1).sample(
+        sample_shape=z_base_sample_shape
+    )
+    torch.random.seed()
+    return z_base_sample
 
 
 class ConvResNet(torch.nn.Module):
@@ -96,87 +85,103 @@ class ConvResNet(torch.nn.Module):
         self.relu_activation = torch.nn.ReLU()
         self.tanh = torch.nn.Tanh()
 
-        self.first_layer = torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=input_shape[0],
-            out_channels=filters,
-            kernel_size=3,
-            padding="same",
-        ))
+        self.first_layer = torch.nn.utils.weight_norm(
+            torch.nn.Conv2d(
+                in_channels=input_shape[0],
+                out_channels=filters,
+                kernel_size=3,
+                padding="same",
+            )
+        )
 
         self.second_layer = torch.nn.BatchNorm2d(num_features=filters)
 
-        self.third_layer = torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=filters,
-            out_channels=input_shape[0],
-            kernel_size=3,
-            padding="same",
-        ))
+        self.third_layer = torch.nn.utils.weight_norm(
+            torch.nn.Conv2d(
+                in_channels=filters,
+                out_channels=input_shape[0],
+                kernel_size=3,
+                padding="same",
+            )
+        )
         self.fourth_layer = torch.nn.BatchNorm2d(num_features=input_shape[0])
 
-        self.sixth_layer = torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=input_shape[0],
-            out_channels=filters,
-            kernel_size=3, bias=False,
-            padding="same",
-        ))
+        self.sixth_layer = torch.nn.utils.weight_norm(
+            torch.nn.Conv2d(
+                in_channels=input_shape[0],
+                out_channels=filters,
+                kernel_size=3,
+                bias=False,
+                padding="same",
+            )
+        )
         self.seventh_layer = torch.nn.BatchNorm2d(num_features=filters)
 
-        self.eights_layer = torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=filters,
-            out_channels=input_shape[0],
-            kernel_size=3, bias=False,
-            padding="same",
-        ))
+        self.eights_layer = torch.nn.utils.weight_norm(
+            torch.nn.Conv2d(
+                in_channels=filters,
+                out_channels=input_shape[0],
+                kernel_size=3,
+                bias=False,
+                padding="same",
+            )
+        )
         self.ninth_layer = torch.nn.BatchNorm2d(num_features=input_shape[0])
 
-        self.h2 = torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=input_shape[0],
-            out_channels=2 * input_shape[0],
-            kernel_size=3,
-            padding="same",
-        ))
-        
-        self.blocks = torch.nn.ModuleList([self.create_block(filters=input_shape[0],out_channels=input_shape[0])
-                                           for _ in range(num_blocks)])
-        
+        self.h2 = torch.nn.utils.weight_norm(
+            torch.nn.Conv2d(
+                in_channels=input_shape[0],
+                out_channels=2 * input_shape[0],
+                kernel_size=3,
+                padding="same",
+            )
+        )
+
+        self.blocks = torch.nn.ModuleList(
+            [
+                self.create_block(filters=input_shape[0], out_channels=input_shape[0])
+                for _ in range(num_blocks)
+            ]
+        )
 
     def create_block(self, filters, out_channels):
-        block =\
-        torch.nn.Sequential(
+        block = torch.nn.Sequential(
             self.relu_activation,
-            
-            torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=filters,
-            out_channels=out_channels,
-            kernel_size=3, bias=False,
-            padding="same")),
-            
+            torch.nn.utils.weight_norm(
+                torch.nn.Conv2d(
+                    in_channels=filters,
+                    out_channels=out_channels,
+                    kernel_size=3,
+                    bias=False,
+                    padding="same",
+                )
+            ),
             torch.nn.BatchNorm2d(num_features=out_channels),
-            
             self.relu_activation,
-            
-            torch.nn.utils.weight_norm(torch.nn.Conv2d(
-            in_channels=out_channels,
-            out_channels=out_channels,
-            kernel_size=3,
-            padding="same")),
-            
+            torch.nn.utils.weight_norm(
+                torch.nn.Conv2d(
+                    in_channels=out_channels,
+                    out_channels=out_channels,
+                    kernel_size=3,
+                    padding="same",
+                )
+            ),
         )
         return block
-        
+
     def forward(self, x):
-        y = self.first_layer(x) # conv
-        y = self.relu_activation(y) # relu
-        y = self.second_layer(y) # BN
-        y = self.third_layer(y) # conv
-        y = self.relu_activation(y) # relu
-        y = self.fourth_layer(y) # BN
+        y = self.first_layer(x)  # conv
+        y = self.relu_activation(y)  # relu
+        y = self.second_layer(y)  # BN
+        y = self.third_layer(y)  # conv
+        y = self.relu_activation(y)  # relu
+        y = self.fourth_layer(y)  # BN
 
         y = y + x
-        
+
         for block in self.blocks:
             y = y + block(y)
-        
+
         z = self.sixth_layer(y)
         z = self.relu_activation(z)
         z = self.seventh_layer(z)
@@ -231,6 +236,7 @@ def squeeze(x):
     x = x.contiguous().view(b_size, c * 4, h // 2, w // 2)
     return x
 
+
 def unsqueeze(z):
     # unsqueeze
     b_size, c, h, w = z.shape
@@ -239,8 +245,17 @@ def unsqueeze(z):
     z = z.contiguous().view(b_size, c // 4, h * 2, w * 2)
     return z
 
+
 class AffineCouplingLayer(torch.nn.Module):
-    def __init__(self,  mask_type, mask_orientation, input_shape, num_filters, device, num_resnet_blocks=8) -> None:
+    def __init__(
+        self,
+        mask_type,
+        mask_orientation,
+        input_shape,
+        num_filters,
+        device,
+        num_resnet_blocks=8,
+    ) -> None:
         super().__init__()
         self.mask_type = mask_type
         self.mask_orientation = mask_orientation
@@ -260,7 +275,11 @@ class AffineCouplingLayer(torch.nn.Module):
             )
 
         self.mask = self.mask.to(device)
-        self.nn = ConvResNet(input_shape=self.input_shape, filters=self.num_filters, num_blocks=num_resnet_blocks)
+        self.nn = ConvResNet(
+            input_shape=self.input_shape,
+            filters=self.num_filters,
+            num_blocks=num_resnet_blocks,
+        )
 
     def forward(self, x):
         masked_x = self.mask * x
@@ -268,7 +287,7 @@ class AffineCouplingLayer(torch.nn.Module):
         y = masked_x + (1 - self.mask) * (x * torch.exp(logscale) + shift)
         logdet = torch.sum((1 - self.mask) * logscale, dim=[1, 2, 3])
         return y, logdet
-    
+
     @torch.no_grad()
     def reverse(self, z):
         masked_z = self.mask * z
@@ -281,36 +300,48 @@ class AffineCouplingLayer(torch.nn.Module):
 
 
 class FinalScale(torch.nn.Module):
-    def __init__(self, device, base_input_shape=[6, 16, 16], num_resnet_blocks=8) -> None:
+    def __init__(
+        self, device, base_input_shape=[6, 16, 16], num_resnet_blocks=8
+    ) -> None:
         self.base_input_shape = base_input_shape
         super().__init__()
         self.aff_1 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=0,
             input_shape=self.base_input_shape,
-            num_filters=128, num_resnet_blocks= num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_2 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=1,
             input_shape=self.base_input_shape,
-            num_filters=128, num_resnet_blocks= num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_3 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=0,
             input_shape=self.base_input_shape,
-            num_filters=128, num_resnet_blocks= num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
         self.aff_4 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=1,
             input_shape=self.base_input_shape,
-            num_filters=128, num_resnet_blocks= num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
-        self.aff_layers = torch.nn.ModuleList([self.aff_1, self.aff_2, self.aff_3, self.aff_4])
+        self.aff_layers = torch.nn.ModuleList(
+            [self.aff_1, self.aff_2, self.aff_3, self.aff_4]
+        )
 
     def forward(self, x):
         total_logdet = 0
@@ -319,72 +350,97 @@ class FinalScale(torch.nn.Module):
             total_logdet += logdet
 
         return x, total_logdet
+
     @torch.no_grad()
     def reverse(self, z):
         for aff in self.aff_layers[::-1]:
             z = aff.reverse(z)
         return z
 
+
 class BatchNormalizationBijector(torch.nn.Module):
-    def __init__(self,input_shape, decay=.999) -> None:
+    def __init__(self, input_shape, decay=0.999) -> None:
         super().__init__()
+        c, h, w = input_shape
         self.decay = decay
-        self.register_buffer("running_mean", torch.zeros(size=input_shape))
-        self.register_buffer("running_std", torch.ones(size=input_shape))
+        self.register_buffer("running_mean", torch.zeros(size=[1, c, h, w]))
+        self.register_buffer("running_std", torch.ones(size=[1, c, h, w]))
 
     def forward(self, x):
         if self.training:
             mean = x.mean(dim=0, keepdim=True)
             std = x.std(dim=0, keepdim=True)
             with torch.no_grad():
-                self.running_mean = self.decay * self.running_mean + (1 - self.decay) * mean
-                self.running_std = self.decay * self.running_std + (1 - self.decay) * std
+                self.running_mean = (
+                    self.decay * self.running_mean + (1 - self.decay) * mean
+                )
+                self.running_std = (
+                    self.decay * self.running_std + (1 - self.decay) * std
+                )
         else:
             mean = self.runnin_mean
             std = self.running_std
-        
-        y = (x - mean)/std
-        logdet =  -(torch.log(std)).sum(dim=[1, 2, 3])
-        
+
+        y = (x - mean) / std
+        logdet = -(torch.log(std)).sum(dim=[1, 2, 3])
+
         return y, logdet
+
     @torch.no_grad()
     def reverse(self, y):
-        x = self.running_std *  y + self.running_mean
-        return x 
+        x = self.running_std * y + self.running_mean
+        return x
+
 
 class FlowBlock(torch.nn.Module):
-    def __init__(self,device, num_step_of_flow=1, base_input_shape=[3, 32, 32],  num_resnet_blocks=8) -> None:
+    def __init__(
+        self,
+        device,
+        num_step_of_flow=1,
+        base_input_shape=[3, 32, 32],
+        num_resnet_blocks=8,
+    ) -> None:
         super().__init__()
         # each num_step_of_flow consists of 6 AffineCoupling layers (1 Scale operation)
-        self.scales = torch.nn.ModuleList([Scale(base_input_shape=base_input_shape,
-                                              mask_orientation=i%2, device=device,
-                                              num_resnet_blocks=num_resnet_blocks) for i in range(num_step_of_flow)])
-        
+        self.scales = torch.nn.ModuleList(
+            [
+                Scale(
+                    base_input_shape=base_input_shape,
+                    mask_orientation=i % 2,
+                    device=device,
+                    num_resnet_blocks=num_resnet_blocks,
+                )
+                for i in range(num_step_of_flow)
+            ]
+        )
+
     def forward(self, x):
         total_logdet = 0
         for scale in self.scales:
             x, log_det = scale(x)
-            
+
             total_logdet += log_det
-        
+
         x = squeeze(x)
         return x, total_logdet
-    
+
     @torch.no_grad()
     def reverse(self, z):
-        
         z = unsqueeze(z)
         for scale in self.scales[::-1]:
             z = scale.reverse(z)
-        
-        
+
         return z
 
 
 class Scale(torch.nn.Module):
-    def __init__(self, device, base_input_shape=[3, 32, 32],
-                 mask_orientation=1,
-                 num_resnet_blocks=8) -> None:
+    def __init__(
+        self,
+        device,
+        base_input_shape=[3, 32, 32],
+        mask_orientation=1,
+        num_resnet_blocks=8,
+    ) -> None:
         super().__init__()
         self.base_input_shape = base_input_shape
         self.output_shape = [
@@ -395,49 +451,69 @@ class Scale(torch.nn.Module):
 
         self.aff_1 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
-            mask_orientation=1-mask_orientation,
+            mask_orientation=1 - mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64, num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=64,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_2 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
             mask_orientation=mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64,num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=64,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_3 = AffineCouplingLayer(
             mask_type="checkerboard_binary_mask",
-            mask_orientation=1-mask_orientation,
+            mask_orientation=1 - mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=64,num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=64,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
-        self.batch_normalization_bijector_1 = BatchNormalizationBijector(input_shape=base_input_shape)
+        self.batch_normalization_bijector_1 = BatchNormalizationBijector(
+            input_shape=base_input_shape
+        )
         self.aff_4 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
-            mask_orientation=1-mask_orientation,
+            mask_orientation=1 - mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=128,num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_5 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
             mask_orientation=mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=128,num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
 
         self.aff_6 = AffineCouplingLayer(
             mask_type="channel_binary_mask",
-            mask_orientation=1-mask_orientation,
+            mask_orientation=1 - mask_orientation,
             input_shape=self.base_input_shape,
-            num_filters=128,num_resnet_blocks=num_resnet_blocks, device=device
+            num_filters=128,
+            num_resnet_blocks=num_resnet_blocks,
+            device=device,
         )
-        self.batch_normalization_bijector_2 = BatchNormalizationBijector(input_shape=self.base_input_shape)
-        
-        self.first_half_transformers = torch.nn.ModuleList([self.aff_1, self.aff_2, self.aff_3, self.batch_normalization_bijector_1])
-        self.second_half_transformers = torch.nn.ModuleList([self.aff_4, self.aff_5, self.aff_6, self.batch_normalization_bijector_2])
+        self.batch_normalization_bijector_2 = BatchNormalizationBijector(
+            input_shape=self.base_input_shape
+        )
+
+        self.first_half_transformers = torch.nn.ModuleList(
+            [self.aff_1, self.aff_2, self.aff_3, self.batch_normalization_bijector_1]
+        )
+        self.second_half_transformers = torch.nn.ModuleList(
+            [self.aff_4, self.aff_5, self.aff_6, self.batch_normalization_bijector_2]
+        )
 
     def forward(self, x):
         total_logdet = 0
@@ -445,18 +521,16 @@ class Scale(torch.nn.Module):
             x, logdet = transformer(x)
             total_logdet += logdet
 
-
         for transformer in self.second_half_transformers:
             x, log_det = transformer(x)
             total_logdet += log_det
 
         return x, total_logdet
-    
+
     @torch.no_grad()
     def reverse(self, z):
         for transformer in self.second_half_transformers[::-1]:
             z = transformer.reverse(z)
-
 
         for transformer in self.first_half_transformers[::-1]:
             z = transformer.reverse(z)
@@ -465,45 +539,70 @@ class Scale(torch.nn.Module):
 
 
 class RealNVP(torch.nn.Module):
-    def __init__(self,device, n_bins=256,base_input_shape=[3, 32, 32],
-                 num_scales=2, # L
-                 num_step_of_flow=1, # K
-                 num_resnet_blocks=8) -> None:
+    def __init__(
+        self,
+        device,
+        n_bins=256,
+        base_input_shape=[3, 32, 32],
+        num_scales=2,  # L
+        num_step_of_flow=1,  # K
+        num_resnet_blocks=8,
+    ) -> None:
         super().__init__()
         self.device = device
         c, h, w = base_input_shape
-        self.flow_blocks = torch.nn.ModuleList([FlowBlock(base_input_shape=[c* 2**i, h//2**i, w//2**i], # after each scale h and w area halved and added to channel, half of the channel is truncated before the next scale hence c * 2^i rather (c * 2 ^(2i))
-                                                     num_step_of_flow=num_step_of_flow,  
-                                                     num_resnet_blocks=num_resnet_blocks, device=device)
-                                           for i in range(num_scales)])
-        self.final_scale = FinalScale(base_input_shape=[c* 2**(num_scales),
-                                                        h//2**(num_scales),
-                                                        w//2**(num_scales)], device=device) # the shape of this depends on howmany splits we are going to have
+        self.flow_blocks = torch.nn.ModuleList(
+            [
+                FlowBlock(
+                    base_input_shape=[
+                        c * 2**i,
+                        h // 2**i,
+                        w // 2**i,
+                    ],  # after each scale h and w area halved and added to channel, half of the channel is truncated before the next scale hence c * 2^i rather (c * 2 ^(2i))
+                    num_step_of_flow=num_step_of_flow,
+                    num_resnet_blocks=num_resnet_blocks,
+                    device=device,
+                )
+                for i in range(num_scales)
+            ]
+        )
+        self.final_scale = FinalScale(
+            base_input_shape=[
+                c * 2 ** (num_scales),
+                h // 2 ** (num_scales),
+                w // 2 ** (num_scales),
+            ],
+            device=device,
+        )  # the shape of this depends on howmany splits we are going to have
 
         self.normal = Normal(0.0, 1.0)
         self.n_pixels = c * h * w
         self.n_bins = n_bins
-    
+
     def forward(self, x):
         x_splits = []
         total_logdet = 0
-        
+
         for scale in self.flow_blocks:
-            x, logdet = scale(x) # x will be squeezed as the outcome of this e.g 3, 32, 32 --> 12, 16, 16 
+            x, logdet = scale(
+                x
+            )  # x will be squeezed as the outcome of this e.g 3, 32, 32 --> 12, 16, 16
             total_logdet += logdet
-            
+
             # split
-            x, z = torch.chunk(x, chunks=2, dim=1) # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
+            x, z = torch.chunk(
+                x, chunks=2, dim=1
+            )  # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
             x_splits.append(z)
-         
+
         x, logdet = self.final_scale(x)
         total_logdet += logdet
         # unsqueeze to get back to original shape
-        #print("-----")
+        # print("-----")
         for split in x_splits[::-1]:
             x = torch.concat([x, split], dim=1)
             x = unsqueeze(x)
-        
+
         z_log_prob = torch.sum(self.normal.log_prob(x), dim=[1, 2, 3])
         log_prob = z_log_prob + total_logdet
 
@@ -511,7 +610,7 @@ class RealNVP(torch.nn.Module):
         loss = log_prob + loss
         final_loss = (-loss / (log(2.0) * self.n_pixels)).mean()
         return x, final_loss
-    
+
     @torch.no_grad()
     def reverse(self, z):
         z = self.final_scale.reverse(z)
@@ -528,15 +627,17 @@ class RealNVP(torch.nn.Module):
         z_samples can be provided in order to see how the model generates images over the course of training.
         """
         if z_base_sample is None:
-            num_channels = self.final_scale.base_input_shape[0] 
+            num_channels = self.final_scale.base_input_shape[0]
             height, width = self.final_scale.base_input_shape[1:]
             sample_size = [num_samples, num_channels, height, width]
             z_base_sample = self.normal.sample(sample_shape=sample_size)
         else:
             # z_sample zero'th dimention is the sample size
-            assert z_base_sample.shape[1] == self.final_scale.base_input_shape[0] and \
-            z_base_sample.shape[2] == self.final_scale.base_input_shape[1] and \
-            z_base_sample.shape[3] == self.final_scale.base_input_shape[2]
+            assert (
+                z_base_sample.shape[1] == self.final_scale.base_input_shape[0]
+                and z_base_sample.shape[2] == self.final_scale.base_input_shape[1]
+                and z_base_sample.shape[3] == self.final_scale.base_input_shape[2]
+            )
         z_base_sample = z_base_sample.to(self.device)
         generated_image = self.reverse(z_base_sample)
         return generated_image
