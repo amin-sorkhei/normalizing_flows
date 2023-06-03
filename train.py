@@ -3,12 +3,12 @@ import yaml
 from dataset import create_dataset
 from utils import (
     RecNameSpace,
-    RealNVP,
     save_plot,
     check_point_model,
     create_deterministic_sample,
-    time_now_to_str
+    time_now_to_str,
 )
+from flow_models import RealNVP
 import torch
 import os
 import logging
@@ -16,6 +16,7 @@ import datetime
 import time
 import glob
 from types import SimpleNamespace
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -61,14 +62,14 @@ def train(
 
     # dataset = ImageDataset(root_dir=train_params.dataset_path)
     # dataloader = init_dataloader(dataset, batch_size=train_params.batch_size)
-    dataset = create_dataset(dataset_name=data_params.dataset_name,
-                             num_samples=data_params.num_samples,
-                             bathc_size=data_params.batch_size,
-                             num_workers=data_params.num_workers
-                             )
+    dataset = create_dataset(
+        dataset_name=data_params.dataset_name,
+        num_samples=data_params.num_samples,
+        bathc_size=data_params.batch_size,
+        num_workers=data_params.num_workers,
+    )
 
     realnvp = RealNVP(
-        device=device,
         base_input_shape=[3, 64, 64],
         num_scales=model_params.num_scales,
         num_step_of_flow=model_params.num_step_of_flow,
@@ -114,7 +115,7 @@ def train(
         loss_per_bath = []
         epoch_start_time = time.time()
         for i, data in enumerate(dataset):
-            image_batch = data[0].to(device) # we only need the image, hence [0]
+            image_batch = data[0].to(device)  # we only need the image, hence [0]
             optimizer.zero_grad()
             z, loss = realnvp(image_batch)
             loss.backward()
@@ -149,9 +150,9 @@ def train(
             sampling_params.num_samples_nrow,
             sampling_params.num_samples_ncols,
         )
-        generated_image = realnvp.sample(n_row * n_column, z_base_sample=None).view(
-            n_row, n_column, 3, 64, 64
-        )
+        generated_image = realnvp.sample(
+            num_samples=n_row * n_column, z_base_sample=None, device=device
+        ).view(n_row, n_column, 3, 64, 64)
         save_plot(
             n_row=n_row,
             n_column=n_column,
@@ -162,7 +163,7 @@ def train(
         )
         if sampling_params.generate_fixed_images is True:
             generated_image_fixed = realnvp.sample(
-                n_row * n_column, z_base_sample=z_base_sample
+                num_samples=n_row * n_column, z_base_sample=z_base_sample, device=device
             ).view(n_row, n_column, 3, 64, 64)
             save_plot(
                 n_row=n_row,
