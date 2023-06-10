@@ -1,8 +1,10 @@
 
 model_params:
-  num_resnet_blocks: 1
-  num_scales: 1 #L split happens after each scale
-  num_step_of_flow: 1 # K each flow step has 6 affine coupling layers
+  model_type: glow
+  num_resnet_blocks: 1 # will be ignored in case of glow
+  num_scales: 3 #L split happens after each block
+  num_step_of_flow: 32 # K each flow step (in case of RealNVP it has 6 affine coupling layers)
+  n_bins:  265
 
 train_params:
   lr: 1.e-3
@@ -13,7 +15,7 @@ data_params:
   num_samples: 128
   batch_size: 128
   num_workers: 1
-  dataset_name: CelebA # or lsun_bedroom
+  dataset_name: lsun_bedroom # or lsun_bedroom
 
 sampling_params:
   num_samples_nrow: 5

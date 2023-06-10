@@ -8,6 +8,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import logging
 import datetime
+from torch.nn import functional as F
 
 logger = logging.getLogger()
 
@@ -16,6 +17,12 @@ def time_now_to_str():
     time_now = datetime.datetime.utcnow()
     time_now_str = datetime.datetime.strftime(time_now, format="%Y%m%d_%H%M%S")
     return time_now_str
+
+
+def add_noise(batch, n_bins):
+    """adds noise to the batch in order to avoid
+    de-generation of the learnt distribution"""
+    return batch + torch.rand_like(batch) / n_bins
 
 
 class RecNameSpace(SimpleNamespace):
@@ -41,7 +48,10 @@ def check_point_model(model, epoch, optimizer, loss, path):
 
 
 def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False):
-    logger.setLevel(logging.ERROR)  # to avoid plt warnings about values out of range
+    logging.info(
+        f"min_value {generated_image.min()} and max_value {generated_image.max()} in the generated image"
+    )
+    generated_image = torch.clamp(generated_image, min=0, max=1)
     fig, ax = plt.subplots(n_row, n_column, squeeze=True)
     fig.subplots_adjust(wspace=0.02, hspace=0.02)
     for i in range(0, n_row):
@@ -50,12 +60,12 @@ def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False):
             image = generated_image[i, j].permute([1, 2, 0]).detach().cpu().numpy()
             _ = ax[i, j].imshow(image, aspect="auto")
     plt.suptitle(f"generated_plot epoch {epoch}")
-    # TODO: the following 2 lines can be re-written
+    # TODO: refactor the following lines
     if fixed_image is True:
         fig.savefig(os.path.join(path, f"fixed_generated_image_epoch_{epoch}.png"))
     else:
         fig.savefig(os.path.join(path, f"generated_image_epoch_{epoch}.png"))
-    logger.setLevel(logging.INFO)
+    # logger.setLevel(logging.INFO)
     plt.close("all")  # close all figures to avoid memory consumption
 
 
@@ -75,6 +85,49 @@ def create_deterministic_sample(sampling_params, input_shape, seed=42):
     )
     torch.random.seed()
     return z_base_sample
+
+
+class SimpleResNet(torch.nn.Module):
+    def __init__(self, input_shape, filters=512) -> None:
+        super().__init__()
+        self.relu = torch.nn.ReLU()
+        self.first_layer = torch.nn.Conv2d(
+            in_channels=input_shape[0],
+            out_channels=filters,
+            bias=False,
+            kernel_size=3,
+            padding="same",
+        )
+        self.BN1 = torch.nn.BatchNorm2d(num_features=filters)
+        self.second_layer = torch.nn.Conv2d(
+            in_channels=filters,
+            out_channels=filters,
+            padding="same",
+            kernel_size=1,
+            bias=False,
+        )
+        self.BN2 = torch.nn.BatchNorm2d(num_features=filters)
+
+        self.third_layer = torch.nn.Conv2d(
+            in_channels=filters,
+            padding="same",
+            out_channels=2 * input_shape[0],
+            kernel_size=3,
+        )
+        torch.nn.init.zeros_(self.third_layer.weight)
+        self.sigmoid = torch.nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.first_layer(x)
+        y = self.relu(y)
+        y = self.BN1(y)
+        y = self.second_layer(y)
+        y = self.relu(y)
+        y = self.BN2(y)
+        y = self.third_layer(y)
+        shift, log_scale = torch.chunk(y, chunks=2, dim=1)
+        log_scale = self.sigmoid(log_scale)
+        return shift, log_scale
 
 
 class ConvResNet(torch.nn.Module):
@@ -254,6 +307,7 @@ class AffineCouplingLayer(torch.nn.Module):
         input_shape,
         num_filters,
         num_resnet_blocks=8,
+        conv_class=ConvResNet,
     ) -> None:
         super().__init__()
         self.mask_type = mask_type
@@ -275,11 +329,14 @@ class AffineCouplingLayer(torch.nn.Module):
 
         # self.mask = self.mask.to(device)
         self.register_buffer("mask", mask)
-        self.nn = ConvResNet(
-            input_shape=self.input_shape,
-            filters=self.num_filters,
-            num_blocks=num_resnet_blocks,
-        )
+        conv_class_params = {
+            "input_shape": self.input_shape,
+            "filters": self.num_filters,
+        }
+        if conv_class == ConvResNet:
+            conv_class_params["num_blocks"] = num_resnet_blocks
+
+        self.nn = conv_class(**conv_class_params)
 
     def forward(self, x):
         masked_x = self.mask * x
@@ -300,9 +357,7 @@ class AffineCouplingLayer(torch.nn.Module):
 
 
 class FinalScale(torch.nn.Module):
-    def __init__(
-        self, base_input_shape=[6, 16, 16], num_resnet_blocks=8
-    ) -> None:
+    def __init__(self, base_input_shape=[6, 16, 16], num_resnet_blocks=8) -> None:
         self.base_input_shape = base_input_shape
         super().__init__()
         self.aff_1 = AffineCouplingLayer(
@@ -408,7 +463,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=64,
             num_resnet_blocks=num_resnet_blocks,
-
         )
 
         self.aff_2 = AffineCouplingLayer(
@@ -417,7 +471,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=64,
             num_resnet_blocks=num_resnet_blocks,
-
         )
 
         self.aff_3 = AffineCouplingLayer(
@@ -426,7 +479,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=64,
             num_resnet_blocks=num_resnet_blocks,
-
         )
         self.batch_normalization_bijector_1 = BatchNormalizationBijector(
             input_shape=base_input_shape
@@ -437,7 +489,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=128,
             num_resnet_blocks=num_resnet_blocks,
-
         )
 
         self.aff_5 = AffineCouplingLayer(
@@ -446,7 +497,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=128,
             num_resnet_blocks=num_resnet_blocks,
-
         )
 
         self.aff_6 = AffineCouplingLayer(
@@ -455,7 +505,6 @@ class Scale(torch.nn.Module):
             input_shape=self.base_input_shape,
             num_filters=128,
             num_resnet_blocks=num_resnet_blocks,
-
         )
         self.batch_normalization_bijector_2 = BatchNormalizationBijector(
             input_shape=self.base_input_shape
@@ -498,12 +547,12 @@ class Invertibe1by1Convolution(torch.nn.Module):
         super().__init__()
         self.num_channels = num_channels
         random_weight = torch.rand(size=[self.num_channels, self.num_channels])
-        rotation_w, _ = torch.qr(random_weight)
+        rotation_w, _ = torch.linalg.qr(random_weight)
         rotation_w = rotation_w.unsqueeze(2).unsqueeze(3)
         self.weight = torch.nn.Parameter(rotation_w)
 
     def forward(self, x):
-        _, h, w = x.shape
+        _, _, h, w = x.shape
         y = F.conv2d(input=x, weight=self.weight, padding="same", groups=1)
         log_det = h * w * torch.log(torch.abs(torch.linalg.det(self.weight.squeeze())))
         return y, log_det
@@ -547,4 +596,41 @@ class ActNorm(torch.nn.Module):
             self.initialized is True
         ), "ActNorm needs to be initialized before calling reverse"
         x = z * torch.sqrt(self.batch_variance) + self.batch_mean
+        return x
+
+
+class StepOfGlow(torch.nn.Module):
+    """implementes one step of the flow in the GLOW paper"""
+
+    def __init__(self, base_input_shape, num_resnet_blocks, num_filters=512) -> None:
+        super().__init__()
+        self.base_input_shape = base_input_shape
+        c, h, w = self.base_input_shape
+        self.act_norm = ActNorm()
+        self.invertible_1by1_conv = Invertibe1by1Convolution(num_channels=c)
+
+        self.mask_type = "channel_binary_mask"
+        self.affine_coupling_layer = AffineCouplingLayer(
+            mask_type="channel_binary_mask",
+            mask_orientation=0,  # we are using 1x1 conv, so orientation is not important
+            input_shape=base_input_shape,
+            num_filters=num_filters,
+            num_resnet_blocks=num_resnet_blocks,
+            conv_class=SimpleResNet,
+        )
+
+    def forward(self, x):
+        total_log_det = 0
+        x, log_det = self.act_norm(x)
+        total_log_det += log_det
+        x, log_det = self.invertible_1by1_conv(x)
+        total_log_det += log_det
+        x, log_det = self.affine_coupling_layer(x)
+        total_log_det += log_det
+        return x, total_log_det
+
+    def reverse(self, z):
+        x = self.affine_coupling_layer.reverse(z)
+        x = self.invertible_1by1_conv.reverse(x)
+        x = self.act_norm.reverse(x)
         return x

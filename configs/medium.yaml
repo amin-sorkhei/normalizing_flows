@@ -1,8 +1,10 @@
 
 model_params:
-  num_resnet_blocks: 16
-  num_scales: 2 #L split happens after each scale
-  num_step_of_flow: 2 # K each flow step has 6 affine coupling layers
+  model_type: glow
+  num_resnet_blocks: 1 # this will be ignored in glow
+  num_scales: 3 #L split happens after each scale
+  num_step_of_flow: 22 # K each flow step has 6 affine coupling layers
+  n_bins:  265
 
 train_params:
   lr: 1.e-3
@@ -13,10 +15,10 @@ data_params:
   num_samples: -1
   batch_size: 128
   num_workers: 8
-  dataset_name: lsun_bedroom # CelebA or lsun_bedroom
+  dataset_name: CelebA # CelebA or lsun_bedroom
 
 sampling_params:
   num_samples_nrow: 5
   num_samples_ncols: 5
   generate_fixed_images: True
-  samples_output_path: ./samples/lsun_bedroom_64*64_2_scales_12_affinelayers_16_resnetblocks
+  samples_output_path: ./samples/glow_CelebA_64*64_L3_K22

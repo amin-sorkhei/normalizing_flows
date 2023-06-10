@@ -7,8 +7,9 @@ from utils import (
     check_point_model,
     create_deterministic_sample,
     time_now_to_str,
+    add_noise,
 )
-from flow_models import RealNVP
+from models import RealNVP, Glow
 import torch
 import os
 import logging
@@ -68,16 +69,31 @@ def train(
         bathc_size=data_params.batch_size,
         num_workers=data_params.num_workers,
     )
+    if model_params.model_type == "realnvp":
+        model = RealNVP(
+            base_input_shape=[3, 64, 64],
+            num_scales=model_params.num_scales,
+            num_step_of_flow=model_params.num_step_of_flow,
+            num_resnet_blocks=model_params.num_resnet_blocks,
+            n_bins=model_params.n_bins,
+        ).to(device)
+    elif model_params.model_type == "glow":
+        model = Glow(
+            base_input_shape=[3, 64, 64],
+            L=model_params.num_scales,
+            K=model_params.num_step_of_flow,
+            num_resnet_blocks=model_params.num_resnet_blocks,
+            n_bins=model_params.n_bins,
+        ).to(device)
 
-    realnvp = RealNVP(
-        base_input_shape=[3, 64, 64],
-        num_scales=model_params.num_scales,
-        num_step_of_flow=model_params.num_step_of_flow,
-        num_resnet_blocks=model_params.num_resnet_blocks,
-    ).to(device)
-    optimizer = torch.optim.Adam(lr=train_params.lr, params=realnvp.parameters())
+    else:
+        raise NotImplementedError(
+            f"model type {model_params.model_type} not implemented"
+        )
+
+    optimizer = torch.optim.Adam(lr=train_params.lr, params=model.parameters())
     logging.info(
-        f"number of parameters in the model {sum([p.numel() for p in realnvp.parameters()])}"
+        f"number of parameters in the model {sum([p.numel() for p in model.parameters()])}"
     )
 
     if task == "train":
@@ -93,8 +109,8 @@ def train(
 
         epoch_start = ckpt["epoch"]
         best_loss = ckpt["loss"]
-        realnvp.load_state_dict(ckpt["model_state_dict"])
-        realnvp.train()
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.train()
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
         logging.info(
@@ -108,16 +124,17 @@ def train(
     if sampling_params.generate_fixed_images is True:
         z_base_sample = create_deterministic_sample(
             sampling_params=sampling_params,
-            input_shape=realnvp.final_scale.base_input_shape,
+            input_shape=model.output_shape,
         )
     loss_per_epoch = []
     for e in range(epoch_start, epoch_end):
         loss_per_bath = []
         epoch_start_time = time.time()
         for i, data in enumerate(dataset):
-            image_batch = data[0].to(device)  # we only need the image, hence [0]
+            image_batch = data[0]  # we only need the image, hence [0]
+            image_batch = add_noise(image_batch, n_bins=model_params.n_bins).to(device)
             optimizer.zero_grad()
-            z, loss = realnvp(image_batch)
+            _, loss = model(image_batch)
             loss.backward()
             optimizer.step()
             if i % 99 == 0:
@@ -138,19 +155,19 @@ def train(
             best_loss = epoch_loss
             logging.info("check pointing the model")
             check_point_model(
-                model=realnvp,
+                model=model,
                 epoch=e,
                 optimizer=optimizer,
                 loss=epoch_loss,
                 path=train_params.model_checkpoint_path,
             )
 
-        realnvp.eval()
+        model.eval()
         n_row, n_column = (
             sampling_params.num_samples_nrow,
             sampling_params.num_samples_ncols,
         )
-        generated_image = realnvp.sample(
+        generated_image = model.sample(
             num_samples=n_row * n_column, z_base_sample=None, device=device
         ).view(n_row, n_column, 3, 64, 64)
         save_plot(
@@ -162,7 +179,7 @@ def train(
             fixed_image=False,
         )
         if sampling_params.generate_fixed_images is True:
-            generated_image_fixed = realnvp.sample(
+            generated_image_fixed = model.sample(
                 num_samples=n_row * n_column, z_base_sample=z_base_sample, device=device
             ).view(n_row, n_column, 3, 64, 64)
             save_plot(
@@ -174,7 +191,7 @@ def train(
                 fixed_image=True,
             )
 
-        realnvp.train()
+        model.train()
 
         loss_per_epoch.append(epoch_loss)
 
