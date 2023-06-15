@@ -1,6 +1,7 @@
 import torch
 from utils import squeeze, unsqueeze
-from utils import Scale, StepOfGlow
+from utils import Scale, StepOfGlow, ZeroConv2d
+import torch.distributions as td
 
 
 class BaseBlock(torch.nn.Module):
@@ -65,7 +66,7 @@ class RealNVPBlock(BaseBlock):
 
 
 class GlowBlock(torch.nn.Module):
-    def __init__(self, K: int, base_input_shape, num_resnet_blocks, num_filters=64) -> None:
+    def __init__(self, K: int, base_input_shape, num_filters=64) -> None:
         """composed of 3 steps:
         1. squeeze
         2. K steps of the flow
@@ -81,12 +82,15 @@ class GlowBlock(torch.nn.Module):
                 # hence the input shape shoud be c *2 *2, h//2, w//2
                 StepOfGlow(
                     base_input_shape=[c * 2 * 2, h // 2, w // 2],
-                    num_resnet_blocks=num_resnet_blocks,
                     num_filters=num_filters,
                 )
                 for i in range(0, K)
             ]
         )
+        # prior, we learn the prior as a zero convolution
+        # number of input channels half of the last step due to split
+        # number of output channels is 2 times the input channels to accomodate for mu and sigma
+        self.prior = ZeroConv2d(in_channels=c * 2, out_channels=c * 2 * 2)
 
     def forward(self, x):
         """forward operation
@@ -108,15 +112,26 @@ class GlowBlock(torch.nn.Module):
         x_i, z_i = torch.chunk(
             x, chunks=2, dim=1
         )  # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
-        return x_i, total_logdet, z_i
 
-    def reverse(self, z_l, z_i):
+        # learn the prior
+        prior_params = self.prior(x_i)
+        mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
+        sigma = torch.exp(log_sigma)
+        z_log_prob = td.Normal(mu, sigma).log_prob(z_i).sum([1, 2, 3])
+        return x_i, total_logdet, z_log_prob
+
+    def reverse(self, z_l,):
         """reverse operation
 
         Args:
             z_l (_type_): tensorf coming previous transformations
-            z_i (_type_): tensor coming from the split
+
         """
+        prior_params = self.prior(z_l)
+        mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
+        sigma = torch.exp(log_sigma)
+        torch.manual_seed(42)
+        z_i = td.Normal(0, 1).sample(sample_shape=z_l.shape) * sigma + mu
         z = torch.concat([z_l, z_i], dim=1)
         for reverse_step in self.steps[::-1]:
             z = reverse_step.reverse(z)

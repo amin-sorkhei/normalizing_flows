@@ -87,47 +87,80 @@ def create_deterministic_sample(sampling_params, input_shape, seed=42):
     return z_base_sample
 
 
-class SimpleResNet(torch.nn.Module):
+class ZeroConv2d(torch.nn.Module):
+    """conv2d initialized with zero weights as described in Glow paper"""
+
+    def __init__(self, in_channels, out_channels) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=3
+        )
+        self.conv.weight.data.zero_()
+        self.conv.bias.data.zero_()
+        self.scale = torch.nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def forward(self, x):
+        out = F.pad(x, [1, 1, 1, 1], value=1)
+        out = self.conv(out)
+        out *= torch.exp(self.scale * 3)
+        return out
+
+
+class GlowAffineCouplingLayer(torch.nn.Module):
+    """Affine coupling layer from Glow paper"""
+
     def __init__(self, input_shape, filters=512) -> None:
         super().__init__()
+
         self.relu = torch.nn.ReLU()
         self.first_layer = torch.nn.Conv2d(
-            in_channels=input_shape[0],
+            in_channels=input_shape[0]
+            // 2,  # only half of the channels impact scale and sigma
             out_channels=filters,
-            bias=False,
             kernel_size=3,
             padding="same",
         )
-        self.BN1 = torch.nn.BatchNorm2d(num_features=filters)
+        torch.manual_seed(41)
+        self.first_layer.weight.data.normal_(0, 0.05)
+        self.first_layer.bias.data.zero_()
+
         self.second_layer = torch.nn.Conv2d(
             in_channels=filters,
             out_channels=filters,
             padding="same",
             kernel_size=1,
-            bias=False,
         )
-        self.BN2 = torch.nn.BatchNorm2d(num_features=filters)
+        torch.manual_seed(41)
+        self.second_layer.weight.data.normal_(0, 0.05)
+        self.second_layer.bias.data.zero_()
 
-        self.third_layer = torch.nn.Conv2d(
+        self.third_layer = ZeroConv2d(
             in_channels=filters,
-            padding="same",
-            out_channels=2 * input_shape[0],
-            kernel_size=3,
+            out_channels=input_shape[0],
         )
-        torch.nn.init.zeros_(self.third_layer.weight)
-        self.sigmoid = torch.nn.Sigmoid()
+
+        self.net = torch.nn.Sequential(
+            self.first_layer, self.relu, self.second_layer, self.relu, self.third_layer
+        )
 
     def forward(self, x):
-        y = self.first_layer(x)
-        y = self.relu(y)
-        y = self.BN1(y)
-        y = self.second_layer(y)
-        y = self.relu(y)
-        y = self.BN2(y)
-        y = self.third_layer(y)
-        shift, log_scale = torch.chunk(y, chunks=2, dim=1)
-        log_scale = self.sigmoid(log_scale)
-        return shift, log_scale
+        x_a, x_b = torch.chunk(x, chunks=2, dim=1)
+        shift_logscale = self.net(x_a)
+        shift, log_scale = torch.chunk(shift_logscale, chunks=2, dim=1)
+        scale = F.sigmoid(log_scale + 2)
+        x_b_transformed = x_b * scale + shift
+        y = torch.cat([x_a, x_b_transformed], dim=1)
+        log_det = torch.sum(torch.log(scale), dim=[1, 2, 3])
+        return y, log_det
+
+    def reverse(self, z):
+        z_a, z_b = torch.chunk(z, chunks=2, dim=1)
+        shift_logscale = self.net(z_a)
+        shift, log_scale = torch.chunk(shift_logscale, chunks=2, dim=1)
+        scale = F.sigmoid(log_scale + 2)
+        z_b_transformed = (z_b - shift) / scale
+        x = torch.cat([z_a, z_b_transformed], dim=1)
+        return x
 
 
 class ConvResNet(torch.nn.Module):
@@ -546,7 +579,8 @@ class Invertibe1by1Convolution(torch.nn.Module):
     def __init__(self, num_channels) -> None:
         super().__init__()
         self.num_channels = num_channels
-        random_weight = torch.rand(size=[self.num_channels, self.num_channels])
+        torch.manual_seed(41)
+        random_weight = torch.randn(size=[self.num_channels, self.num_channels])
         rotation_w, _ = torch.linalg.qr(random_weight)
         rotation_w = rotation_w.unsqueeze(2).unsqueeze(3)
         self.weight = torch.nn.Parameter(rotation_w)
@@ -566,57 +600,56 @@ class Invertibe1by1Convolution(torch.nn.Module):
 class ActNorm(torch.nn.Module):
     """ActNorm layer from Glow paper"""
 
-    def __init__(self) -> None:
+    def __init__(self, num_channels) -> None:
         super().__init__()
-        self.initialized = False
+        self.batch_mean = torch.nn.Parameter(torch.zeros([1, num_channels, 1, 1]))
+        self.batch_std = torch.nn.Parameter(torch.ones([1, num_channels, 1, 1]))
+
+        self.register_buffer("initialized", torch.tensor(False))
 
     def initialize_layer(self, x):
-        batch_mean = x.mean(dim=[0, 2, 3], keepdim=True)
-        batch_variance = ((x - batch_mean) ** 2).mean(dim=[0, 2, 3], keepdim=True)
+        with torch.no_grad():
+            batch_mean = x.mean(dim=[0, 2, 3], keepdim=True)
+            batch_std = x.std(dim=[0, 2, 3], keepdim=True)
 
-        self.batch_mean = torch.nn.Parameter(batch_mean)
-        self.batch_variance = torch.nn.Parameter(batch_variance)
-        self.initialized = True
+            self.batch_mean.data.copy_(batch_mean)
+            self.batch_std.data.copy_(batch_std)
+            self.initialized.fill_(True)
 
     def forward(self, x):
-        if self.initialized is False:
+        if self.initialized.item() is False:
             self.initialize_layer(x)
 
-        y = (x - self.batch_mean) / torch.sqrt(self.batch_variance)
+        y = (x - self.batch_mean) / self.batch_std  # torch.sqrt(self.batch_variance)
 
         # caluclate log det
         h, w = y.shape[2:]
-        log_det = -0.5 * h * w * torch.log(self.batch_variance).sum()
+        log_det = -h * w * torch.log(torch.abs(self.batch_std)).sum()
         # the above is logdet for one sample in the batch, we to one for each sample in the batch_size
         log_det = torch.tile(log_det, dims=[y.shape[0]])
         return y, log_det
 
     def reverse(self, z):
         assert (
-            self.initialized is True
+            self.initialized.item() is True
         ), "ActNorm needs to be initialized before calling reverse"
-        x = z * torch.sqrt(self.batch_variance) + self.batch_mean
+        x = self.batch_mean + z * self.batch_std  # torch.sqrt(self.batch_variance) +
         return x
 
 
 class StepOfGlow(torch.nn.Module):
     """implementes one step of the flow in the GLOW paper"""
 
-    def __init__(self, base_input_shape, num_resnet_blocks, num_filters=512) -> None:
+    def __init__(self, base_input_shape, num_filters=512) -> None:
         super().__init__()
         self.base_input_shape = base_input_shape
         c, h, w = self.base_input_shape
-        self.act_norm = ActNorm()
+        self.act_norm = ActNorm(c)
         self.invertible_1by1_conv = Invertibe1by1Convolution(num_channels=c)
 
         self.mask_type = "channel_binary_mask"
-        self.affine_coupling_layer = AffineCouplingLayer(
-            mask_type="channel_binary_mask",
-            mask_orientation=0,  # we are using 1x1 conv, so orientation is not important
-            input_shape=base_input_shape,
-            num_filters=num_filters,
-            num_resnet_blocks=num_resnet_blocks,
-            conv_class=SimpleResNet,
+        self.aff = GlowAffineCouplingLayer(
+            input_shape=self.base_input_shape, filters=num_filters
         )
 
     def forward(self, x):
@@ -625,12 +658,12 @@ class StepOfGlow(torch.nn.Module):
         total_log_det += log_det
         x, log_det = self.invertible_1by1_conv(x)
         total_log_det += log_det
-        x, log_det = self.affine_coupling_layer(x)
+        x, log_det = self.aff(x)
         total_log_det += log_det
         return x, total_log_det
 
     def reverse(self, z):
-        x = self.affine_coupling_layer.reverse(z)
+        x = self.aff.reverse(z)
         x = self.invertible_1by1_conv.reverse(x)
         x = self.act_norm.reverse(x)
         return x
