@@ -18,7 +18,7 @@ import time
 import glob
 from types import SimpleNamespace
 
-
+torch.autograd.set_detect_anomaly(True)
 logging.basicConfig(level=logging.INFO)
 
 
@@ -98,13 +98,7 @@ def train(
     if task == "train":
         best_loss = torch.inf
         epoch_start = 0
-        # initialize the model
-        logging.info("initializing the model")
-        model.train()
-        warm_up_batch = next(iter(dataset))
-        with torch.no_grad():
-            z_L, _ = model(warm_up_batch[0].to(device))
-        model.output_shape = z_L.shape[1:]
+
     else:
         logging.info("loading checkpoint")
         best_model_ckpt_path = sorted(
@@ -140,11 +134,11 @@ def train(
             image_batch = data[0]  # we only need the image, hence [0]
             image_batch = add_noise(image_batch, n_bits=model_params.n_bits).to(device)
             optimizer.zero_grad()
-            z_L, loss = model(image_batch)
+            z_L, loss, total_log_prob, total_logdet = model(image_batch)
             loss.backward()
             optimizer.step()
             if i % 99 == 0:
-                print(f"epcoh {e}, batch {i}, loss {loss}")
+                logging.info(f"epcoh {e}, batch {i}, loss {loss}, total_log_prob {total_log_prob}, total_logdet {total_logdet}")
             loss_per_bath.append(loss)
 
         epoch_loss = torch.Tensor(loss_per_bath).mean()

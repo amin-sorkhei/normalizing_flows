@@ -9,9 +9,11 @@ import matplotlib.pyplot as plt
 import logging
 import datetime
 from torch.nn import functional as F
+from torch import nn
 
 logger = logging.getLogger()
 
+logabs = lambda x: torch.log(torch.abs(x))
 
 def time_now_to_str():
     time_now = datetime.datetime.utcnow()
@@ -28,7 +30,9 @@ def add_noise(batch, n_bits):
         (batch / 256) * 2**n_bits
     )  # move to [0:2**n_bits) e.g n_bits=5 --> int([0:31])
     batch = batch / 2**n_bits  # move back to [0:1)
-    batch = batch - .5  # move to [-.5:.5) this should be more friendly to the prior of N(0, 1)
+    batch = (
+        batch - 0.5
+    )  # move to [-.5:.5) this should be more friendly to the prior of N(0, 1)
     return batch + torch.rand_like(batch) / 2**n_bits  # add noise
 
 
@@ -154,7 +158,7 @@ class GlowAffineCouplingLayer(torch.nn.Module):
         x_a, x_b = torch.chunk(x, chunks=2, dim=1)
         shift_logscale = self.net(x_a)
         shift, log_scale = torch.chunk(shift_logscale, chunks=2, dim=1)
-        scale = F.sigmoid(log_scale + 2)
+        scale = torch.sigmoid(log_scale + 2)
         x_b_transformed = x_b * scale + shift
         y = torch.cat([x_a, x_b_transformed], dim=1)
         log_det = torch.sum(torch.log(scale), dim=[1, 2, 3])
@@ -164,7 +168,7 @@ class GlowAffineCouplingLayer(torch.nn.Module):
         z_a, z_b = torch.chunk(z, chunks=2, dim=1)
         shift_logscale = self.net(z_a)
         shift, log_scale = torch.chunk(shift_logscale, chunks=2, dim=1)
-        scale = F.sigmoid(log_scale + 2)
+        scale = torch.sigmoid(log_scale + 2)
         z_b_transformed = (z_b - shift) / scale
         x = torch.cat([z_a, z_b_transformed], dim=1)
         return x
@@ -595,7 +599,8 @@ class Invertibe1by1Convolution(torch.nn.Module):
     def forward(self, x):
         _, _, h, w = x.shape
         y = F.conv2d(input=x, weight=self.weight, padding="same", groups=1)
-        log_det = h * w * torch.log(torch.abs(torch.linalg.det(self.weight.squeeze())))
+        # log_det = h * w * torch.log(torch.abs(torch.linalg.det(self.weight.squeeze())))
+        log_det = h * w * torch.slogdet(self.weight.squeeze().double())[1].float()
         return y, log_det
 
     def reverse(self, x):
@@ -620,7 +625,7 @@ class ActNorm(torch.nn.Module):
             batch_std = x.std(dim=[0, 2, 3], keepdim=True)
 
             self.batch_mean.data.copy_(batch_mean)
-            self.batch_std.data.copy_(batch_std)
+            self.batch_std.data.copy_(batch_std + 1e-6)
             self.initialized.fill_(True)
 
     def forward(self, x):
@@ -655,18 +660,32 @@ class StepOfGlow(torch.nn.Module):
             num_channels=self.num_channels
         )
 
-        self.mask_type = "channel_binary_mask"
         self.aff = GlowAffineCouplingLayer(
             num_channels=self.num_channels, filters=num_filters
         )
 
     def forward(self, x):
+        if torch.isnan(x).any().item():
+            print("x is nan at the beginning of forward")
+        
+        if torch.isnan(self.act_norm.batch_mean).any().item() is True or torch.isnan(self.act_norm.batch_std).any().item() is True:
+            print("act_norm is nan at the beginning of forward ", self.act_norm.batch_mean, self.act_norm.batch_std)
         total_log_det = 0
+        # print("before applying act_norm ----> : ", "mean: ", self.act_norm.batch_mean, "std: ",  self.act_norm.batch_std)
         x, log_det = self.act_norm(x)
+        if torch.isnan(self.act_norm.batch_mean).any().item() is True or torch.isnan(self.act_norm.batch_std).any().item() is True:
+            print("act_norm is nan at the after applying on x ", self.act_norm.batch_mean, self.act_norm.batch_std)
+            
+        if torch.isnan(x).any().item():
+            print("x is nan for act_norm", "mean: ", self.act_norm.batch_mean, "std: ",  self.act_norm.batch_std)
         total_log_det += log_det
         x, log_det = self.invertible_1by1_conv(x)
+        if torch.isnan(x).any().item():
+            print("x is nan for invertible_1by1_conv", self.invertible_1by1_conv)
         total_log_det += log_det
         x, log_det = self.aff(x)
+        if torch.isnan(x).any().item():
+            print("x is nan for aff", self.aff)
         total_log_det += log_det
         return x, total_log_det
 

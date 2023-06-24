@@ -46,7 +46,7 @@ class RealNVP(torch.nn.Module):
         self.output_shape = self.final_scale.base_input_shape
         self.normal = Normal(0.0, 1.0)
         self.n_pixels = c * h * w
-        self.n_bins = 2 ** n_bits
+        self.n_bins = 2**n_bits
 
     def forward(self, x):
         x_splits = []
@@ -133,7 +133,7 @@ class Glow(torch.nn.Module):
         self.normal = Normal(0.0, 1.0)
         c, h, w = base_input_shape
         self.n_pixels = c * h * w
-        self.n_bins = 2 ** n_bits
+        self.n_bins = 2**n_bits
         self.blocks = torch.nn.ModuleList()
         input_channels = c
         for i in range(L - 1):
@@ -212,7 +212,12 @@ class Glow(torch.nn.Module):
         loss = -log(self.n_bins) * self.n_pixels
         loss = log_prob + loss
         final_loss = (-loss / (log(2.0) * self.n_pixels)).mean()
-        return x, final_loss
+        return (
+            x,
+            final_loss,
+            (total_log_prob / (log(2) * self.n_pixels)).mean(),
+            (total_logdet / (log(2) * self.n_pixels)).mean(),
+        )
 
     @torch.no_grad()
     def reverse(self, z_l, device):
