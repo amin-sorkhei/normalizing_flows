@@ -14,7 +14,7 @@ import logging
 class RealNVP(torch.nn.Module):
     def __init__(
         self,
-        n_bins=256,
+        n_bits=8,
         base_input_shape=[3, 32, 32],
         num_scales=2,  # L
         num_step_of_flow=1,  # K
@@ -46,7 +46,7 @@ class RealNVP(torch.nn.Module):
         self.output_shape = self.final_scale.base_input_shape
         self.normal = Normal(0.0, 1.0)
         self.n_pixels = c * h * w
-        self.n_bins = n_bins
+        self.n_bins = 2 ** n_bits
 
     def forward(self, x):
         x_splits = []
@@ -76,7 +76,7 @@ class RealNVP(torch.nn.Module):
 
         loss = (
             -log(self.n_bins) * self.n_pixels
-        )  # implicit transformation that converts [0, 255] values to [0, 1]
+        )  # log det implicit transformation that converts [0, 255] values to [0, 1]
         loss = log_prob + loss
         final_loss = (-loss / (log(2.0) * self.n_pixels)).mean()  # per pixed loss
         return x, final_loss
@@ -122,101 +122,91 @@ class Glow(torch.nn.Module):
         K,
         L,
         base_input_shape,
-        num_resnet_blocks=8,
-        num_resnet_filters=64,
-        n_bins=256,
+        num_resnet_filters=512,
+        n_bits=256,
     ) -> None:
         """
         K: number of steps of flow
         L: number of blocks
         """
         super().__init__()
-
-        c, h, w = base_input_shape
-
         self.normal = Normal(0.0, 1.0)
+        c, h, w = base_input_shape
         self.n_pixels = c * h * w
-        self.n_bins = n_bins
-        self.blocks = torch.nn.ModuleList(
-            [
-                GlowBlock(
-                    K=K,
-                    base_input_shape=[  # *2 for squeezing, *2 for channel split
-                        # when split happens channel is divided by 2 and hence
-                        # there is only one *2
-                        c * 2 ** (i),
-                        # i+1 because we start by squeezing the input and i
-                        # starts from 0
-                        h // 2 ** (i),
-                        w // 2 ** (i),
-                    ],
-                    num_resnet_blocks=num_resnet_blocks,
-                )
-                for i in range(L)
-            ]
+        self.n_bins = 2 ** n_bits
+        self.blocks = torch.nn.ModuleList()
+        input_channels = c
+        for i in range(L - 1):
+            self.blocks.append(GlowBlock(K=K, num_channels=input_channels))
+            input_channels *= 2
+
+        self.blocks.append(
+            GlowBlock(
+                is_final_block=True,
+                K=K,
+                num_channels=input_channels,
+                num_filters=num_resnet_filters,
+            )
         )
-        self.final_step_of_flow = torch.nn.ModuleList(
-            [
-                StepOfGlow(
-                    base_input_shape=[
-                        c * 2 ** (L) * 2 * 2,  # to account for squeezing, this
-                        # is taken care of in GlowBlock though we are not using that.
-                        h // 2 ** (L + 1),  # to account for squeezing
-                        w // 2 ** (L + 1),  # to account for squeezing
-                    ],
-                    num_resnet_blocks=num_resnet_blocks,
-                    num_filters=num_resnet_filters,
-                )
-                for _ in range(K)
-            ]
-        )
-        self.output_shape = self.final_step_of_flow[-1].base_input_shape
+
+        # [
+        #     StepOfGlow(
+        #         base_input_shape=[
+        #             c * 2 ** (L) * 2 * 2,  # to account for squeezing, this
+        #             # is taken care of in GlowBlock though we are not using that.
+        #             h // 2 ** (L + 1),  # to account for squeezing
+        #             w // 2 ** (L + 1),  # to account for squeezing
+        #         ],
+        #         num_filters=num_resnet_filters,
+        #     )
+        #     for _ in range(K)
+        # ]
 
     def forward(self, x):
-        original_input = x
         total_logdet = 0
+        total_log_prob = 0
         splits = []
-        log_prob_from_splits = 0
         for block in self.blocks:
-            x, logdet, split = block(x)
+            x, logdet, z, z_log_prob = block(x)
             total_logdet += logdet
+            splits.append(z if z is not None else x)
 
-            splits.append(split)
-            log_prob_from_splits += self.normal.log_prob(split).sum(dim=(1, 2, 3))
+            total_log_prob += (
+                z_log_prob  # self.normal.log_prob(split).sum(dim=(1, 2, 3))
+            )
+        # # squeeze before the final block
+        # x = squeeze(x)
+        # for step in self.final_step_of_flow:
+        #     x, logdet = step(x)
+        #     total_logdet += logdet
 
-        # squeeze before the final block
-        x = squeeze(x)
-        for step in self.final_step_of_flow:
-            x, logdet = step(x)
-            total_logdet += logdet
-
-        log_prob_from_transformed_x = self.normal.log_prob(x).sum(dim=(1, 2, 3))
-        log_prob_from_splits += self.normal.log_prob(x).sum(dim=(1, 2, 3))
-        total_log_prob = log_prob_from_splits + log_prob_from_transformed_x
+        # log_prob_from_transformed_x = self.normal.log_prob(x).sum(dim=(1, 2, 3))
+        # log_prob_from_splits += self.normal.log_prob(x).sum(dim=(1, 2, 3))
+        # total_log_prob = log_prob_from_splits + log_prob_from_transformed_x
 
         # TODO instead of sanity checks I need to create proper tests!
         # sanity checks
         # unsqueeze to get back to original shape(we dont' need this, just for sanity check)
-        z = unsqueeze(x)
-        for split in splits[::-1]:
-            z = torch.concat([z, split], dim=1)
-            z = unsqueeze(z)
-        # assert log probas are ok (we calculate them for each z independently
-        # rather than zs assembled. contrary to RealNVP)
-        torch.testing.assert_close(
-            self.normal.log_prob(z).sum(dim=(1, 2, 3)),
-            log_prob_from_splits,
-            msg="log_prob does not have the same shape",
-        )
-        # assert z and original input have the same shape, we should not be
-        # altering shape/dimesions due to transformations
-        torch.testing.assert_close(
-            z.shape,
-            original_input.shape,
-            msg=f"z and original_input should have the same shape found {list(z.shape)} vs {list(original_input.shape)}",
-        )
-        # assert log probas are ok, that is no implicit broadcasting is hapenning
-        torch.testing.assert_close(log_prob_from_splits.shape, total_logdet.shape)
+        # z = unsqueeze(x)
+        # for split in splits[::-1]:
+        #     z = torch.concat([z, split], dim=1)
+        #     z = unsqueeze(z)
+        # # assert log probas are ok (we calculate them for each z independently
+        # # rather than zs assembled. contrary to RealNVP)
+        # torch.testing.assert_close(
+        #     self.normal.log_prob(z).sum(dim=(1, 2, 3)),
+        #     total_log_prob,
+        #     msg="log_prob does not have the same shape",
+        # )
+        # # assert z and original input have the same shape, we should not be
+        # # altering shape/dimesions due to transformations
+        # torch.testing.assert_close(
+        #     z.shape,
+        #     original_input.shape,
+        #     msg=f"z and original_input should have the same shape found {list(z.shape)} vs {list(original_input.shape)}",
+        # )
+        # # assert log probas are ok, that is no implicit broadcasting is hapenning
+        # torch.testing.assert_close(total_log_prob.shape, total_logdet.shape)
 
         log_prob = total_log_prob + total_logdet
         loss = -log(self.n_bins) * self.n_pixels
@@ -226,12 +216,12 @@ class Glow(torch.nn.Module):
 
     @torch.no_grad()
     def reverse(self, z_l, device):
-        for step in self.final_step_of_flow[::-1]:
-            z_l = step.reverse(z_l)
-        z_l = unsqueeze(z_l)
+        # for step in self.final_step_of_flow[::-1]:
+        #     z_l = step.reverse(z_l)
+        # z_l = unsqueeze(z_l)
+        z_l = self.normal.sample(sample_shape=z_l.shape).to(device)
         for block in self.blocks[::-1]:
-            z_i = self.normal.sample(sample_shape=z_l.shape).to(device)
-            z_l = block.reverse(z_l=z_l, z_i=z_i)
+            z_l = block.reverse(z_l=z_l, device=device)
         return z_l
 
     @torch.no_grad()
@@ -245,11 +235,11 @@ class Glow(torch.nn.Module):
             num_channels, height, width = self.output_shape
             sample_size = [num_samples, num_channels, height, width]
             z_base_sample = self.normal.sample(sample_shape=sample_size)
-        else:
-            # z_sample zero'th dimention is the sample size
-            assert (
-                list(z_base_sample.shape[1:]) == self.output_shape
-            ), f"{z_base_sample.shape[1:]} vs {self.output_shape}"
+        # else:
+        #     # # z_sample zero'th dimention is the sample size
+        #     # assert (
+        #     #     torch.equal(z_base_sample.shape[1:], self.output_shape)
+        #     # ), f"{z_base_sample.shape[1:]} vs {self.output_shape}"
         z_base_sample = z_base_sample.to(device)
         generated_image = self.reverse(z_base_sample, device=device)
         return generated_image

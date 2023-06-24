@@ -66,31 +66,37 @@ class RealNVPBlock(BaseBlock):
 
 
 class GlowBlock(torch.nn.Module):
-    def __init__(self, K: int, base_input_shape, num_filters=64) -> None:
+    def __init__(
+        self, K: int, num_channels, num_filters=512, is_final_block=False
+    ) -> None:
         """composed of 3 steps:
         1. squeeze
         2. K steps of the flow
         3. split
-
+        is_final_block defines if the is the last block in the model or not.
+        if it is the last block, no split happens
         Args:
             K (int): number of steps of the flow in each block
         """
         super().__init__()
-        c, h, w = base_input_shape
-        self.steps = torch.nn.ModuleList(
-            [  # we do squeeze before calling the first step
-                # hence the input shape shoud be c *2 *2, h//2, w//2
-                StepOfGlow(
-                    base_input_shape=[c * 2 * 2, h // 2, w // 2],
-                    num_filters=num_filters,
-                )
-                for i in range(0, K)
-            ]
-        )
-        # prior, we learn the prior as a zero convolution
-        # number of input channels half of the last step due to split
-        # number of output channels is 2 times the input channels to accomodate for mu and sigma
-        self.prior = ZeroConv2d(in_channels=c * 2, out_channels=c * 2 * 2)
+        self.num_channels = num_channels
+        
+        self.steps = torch.nn.ModuleList()
+        for _ in range(K):
+            self.steps.append(
+                StepOfGlow(num_channels=num_channels * 4, num_filters=num_filters)
+            )
+
+        self.is_final_block = is_final_block
+        if self.is_final_block is False:
+            # prior, we learn the prior as a zero convolution
+            # number of input channels half of the last step due to split
+            # number of output channels is 2 times the input channels to
+            # accommodate for mu and sigma
+            self.prior = ZeroConv2d(
+                in_channels=self.num_channels * 2,
+                out_channels=self.num_channels * 2 * 2,
+            )
 
     def forward(self, x):
         """forward operation
@@ -108,31 +114,45 @@ class GlowBlock(torch.nn.Module):
             x, log_det = step(x)
             total_logdet += log_det
 
-        # split
-        x_i, z_i = torch.chunk(
-            x, chunks=2, dim=1
-        )  # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
+        if self.is_final_block is False:
+            # split
+            x_i, z_i = torch.chunk(
+                x, chunks=2, dim=1
+            )  # chunks x on channel dim e.g 12, 16, 16, --> (6, 6), 16, 16
 
-        # learn the prior
-        prior_params = self.prior(x_i)
-        mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
-        sigma = torch.exp(log_sigma)
-        z_log_prob = td.Normal(mu, sigma).log_prob(z_i).sum([1, 2, 3])
-        return x_i, total_logdet, z_log_prob
+            # learn the prior
+            prior_params = self.prior(x_i)
+            mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
+            sigma = torch.exp(log_sigma)
+            z_log_prob = td.Normal(mu, sigma).log_prob(z_i).sum([1, 2, 3])
 
-    def reverse(self, z_l,):
+        else:
+            # this is the final block, no need to split, no prior will be learnt
+            x_i = x
+            z_log_prob = td.Normal(0.0, 1.0).log_prob(x_i).sum([1, 2, 3])
+            z_i = None  # bc there is no split
+
+        return x_i, total_logdet, z_i, z_log_prob
+
+    def reverse(self, z_l, device=torch.device("cpu")):
         """reverse operation
 
         Args:
             z_l (_type_): tensorf coming previous transformations
 
         """
-        prior_params = self.prior(z_l)
-        mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
-        sigma = torch.exp(log_sigma)
-        torch.manual_seed(42)
-        z_i = td.Normal(0, 1).sample(sample_shape=z_l.shape) * sigma + mu
-        z = torch.concat([z_l, z_i], dim=1)
+        if self.is_final_block is False:
+            prior_params = self.prior(z_l)
+            mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
+            sigma = torch.exp(log_sigma)
+            torch.manual_seed(42)
+            z_i = td.Normal(0, 1).sample(sample_shape=z_l.shape).to(device) * sigma + mu
+            z = torch.concat([z_l, z_i], dim=1)
+
+        else:
+            # this is the final block. No input is expected
+            z = z_l
+
         for reverse_step in self.steps[::-1]:
             z = reverse_step.reverse(z)
 

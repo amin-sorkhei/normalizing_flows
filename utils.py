@@ -19,10 +19,17 @@ def time_now_to_str():
     return time_now_str
 
 
-def add_noise(batch, n_bins):
+def add_noise(batch, n_bits):
     """adds noise to the batch in order to avoid
     de-generation of the learnt distribution"""
-    return batch + torch.rand_like(batch) / n_bins
+
+    batch = batch * 255  # move back to original space for simplicity --> int([0:255])
+    batch = torch.floor(
+        (batch / 256) * 2**n_bits
+    )  # move to [0:2**n_bits) e.g n_bits=5 --> int([0:31])
+    batch = batch / 2**n_bits  # move back to [0:1)
+    batch = batch - .5  # move to [-.5:.5) this should be more friendly to the prior of N(0, 1)
+    return batch + torch.rand_like(batch) / 2**n_bits  # add noise
 
 
 class RecNameSpace(SimpleNamespace):
@@ -109,12 +116,12 @@ class ZeroConv2d(torch.nn.Module):
 class GlowAffineCouplingLayer(torch.nn.Module):
     """Affine coupling layer from Glow paper"""
 
-    def __init__(self, input_shape, filters=512) -> None:
+    def __init__(self, num_channels, filters=512) -> None:
         super().__init__()
 
         self.relu = torch.nn.ReLU()
         self.first_layer = torch.nn.Conv2d(
-            in_channels=input_shape[0]
+            in_channels=num_channels
             // 2,  # only half of the channels impact scale and sigma
             out_channels=filters,
             kernel_size=3,
@@ -136,7 +143,7 @@ class GlowAffineCouplingLayer(torch.nn.Module):
 
         self.third_layer = ZeroConv2d(
             in_channels=filters,
-            out_channels=input_shape[0],
+            out_channels=num_channels,
         )
 
         self.net = torch.nn.Sequential(
@@ -640,16 +647,17 @@ class ActNorm(torch.nn.Module):
 class StepOfGlow(torch.nn.Module):
     """implementes one step of the flow in the GLOW paper"""
 
-    def __init__(self, base_input_shape, num_filters=512) -> None:
+    def __init__(self, num_channels, num_filters=512) -> None:
         super().__init__()
-        self.base_input_shape = base_input_shape
-        c, h, w = self.base_input_shape
-        self.act_norm = ActNorm(c)
-        self.invertible_1by1_conv = Invertibe1by1Convolution(num_channels=c)
+        self.num_channels = num_channels
+        self.act_norm = ActNorm(self.num_channels)
+        self.invertible_1by1_conv = Invertibe1by1Convolution(
+            num_channels=self.num_channels
+        )
 
         self.mask_type = "channel_binary_mask"
         self.aff = GlowAffineCouplingLayer(
-            input_shape=self.base_input_shape, filters=num_filters
+            num_channels=self.num_channels, filters=num_filters
         )
 
     def forward(self, x):

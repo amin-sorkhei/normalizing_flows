@@ -75,15 +75,14 @@ def train(
             num_scales=model_params.num_scales,
             num_step_of_flow=model_params.num_step_of_flow,
             num_resnet_blocks=model_params.num_resnet_blocks,
-            n_bins=model_params.n_bins,
+            n_bits=model_params.n_bits,
         ).to(device)
     elif model_params.model_type == "glow":
         model = Glow(
             base_input_shape=[3, 64, 64],
             L=model_params.num_scales,
             K=model_params.num_step_of_flow,
-            num_resnet_blocks=model_params.num_resnet_blocks,
-            n_bins=model_params.n_bins,
+            n_bits=model_params.n_bits,
         ).to(device)
 
     else:
@@ -99,6 +98,13 @@ def train(
     if task == "train":
         best_loss = torch.inf
         epoch_start = 0
+        # initialize the model
+        logging.info("initializing the model")
+        model.train()
+        warm_up_batch = next(iter(dataset))
+        with torch.no_grad():
+            z_L, _ = model(warm_up_batch[0].to(device))
+        model.output_shape = z_L.shape[1:]
     else:
         logging.info("loading checkpoint")
         best_model_ckpt_path = sorted(
@@ -132,9 +138,9 @@ def train(
         epoch_start_time = time.time()
         for i, data in enumerate(dataset):
             image_batch = data[0]  # we only need the image, hence [0]
-            image_batch = add_noise(image_batch, n_bins=model_params.n_bins).to(device)
+            image_batch = add_noise(image_batch, n_bits=model_params.n_bits).to(device)
             optimizer.zero_grad()
-            _, loss = model(image_batch)
+            z_L, loss = model(image_batch)
             loss.backward()
             optimizer.step()
             if i % 99 == 0:
