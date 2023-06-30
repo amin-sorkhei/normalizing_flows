@@ -149,19 +149,6 @@ class Glow(torch.nn.Module):
             )
         )
 
-        # [
-        #     StepOfGlow(
-        #         base_input_shape=[
-        #             c * 2 ** (L) * 2 * 2,  # to account for squeezing, this
-        #             # is taken care of in GlowBlock though we are not using that.
-        #             h // 2 ** (L + 1),  # to account for squeezing
-        #             w // 2 ** (L + 1),  # to account for squeezing
-        #         ],
-        #         num_filters=num_resnet_filters,
-        #     )
-        #     for _ in range(K)
-        # ]
-
     def forward(self, x):
         total_logdet = 0
         total_log_prob = 0
@@ -174,39 +161,6 @@ class Glow(torch.nn.Module):
             total_log_prob += (
                 z_log_prob  # self.normal.log_prob(split).sum(dim=(1, 2, 3))
             )
-        # # squeeze before the final block
-        # x = squeeze(x)
-        # for step in self.final_step_of_flow:
-        #     x, logdet = step(x)
-        #     total_logdet += logdet
-
-        # log_prob_from_transformed_x = self.normal.log_prob(x).sum(dim=(1, 2, 3))
-        # log_prob_from_splits += self.normal.log_prob(x).sum(dim=(1, 2, 3))
-        # total_log_prob = log_prob_from_splits + log_prob_from_transformed_x
-
-        # TODO instead of sanity checks I need to create proper tests!
-        # sanity checks
-        # unsqueeze to get back to original shape(we dont' need this, just for sanity check)
-        # z = unsqueeze(x)
-        # for split in splits[::-1]:
-        #     z = torch.concat([z, split], dim=1)
-        #     z = unsqueeze(z)
-        # # assert log probas are ok (we calculate them for each z independently
-        # # rather than zs assembled. contrary to RealNVP)
-        # torch.testing.assert_close(
-        #     self.normal.log_prob(z).sum(dim=(1, 2, 3)),
-        #     total_log_prob,
-        #     msg="log_prob does not have the same shape",
-        # )
-        # # assert z and original input have the same shape, we should not be
-        # # altering shape/dimesions due to transformations
-        # torch.testing.assert_close(
-        #     z.shape,
-        #     original_input.shape,
-        #     msg=f"z and original_input should have the same shape found {list(z.shape)} vs {list(original_input.shape)}",
-        # )
-        # # assert log probas are ok, that is no implicit broadcasting is hapenning
-        # torch.testing.assert_close(total_log_prob.shape, total_logdet.shape)
 
         log_prob = total_log_prob + total_logdet
         loss = -log(self.n_bins) * self.n_pixels
@@ -220,31 +174,24 @@ class Glow(torch.nn.Module):
         )
 
     @torch.no_grad()
-    def reverse(self, z_l, device):
-        # for step in self.final_step_of_flow[::-1]:
-        #     z_l = step.reverse(z_l)
-        # z_l = unsqueeze(z_l)
-        z_l = self.normal.sample(sample_shape=z_l.shape).to(device)
+    def reverse(self, z_l, device, T=1.):
         for block in self.blocks[::-1]:
-            z_l = block.reverse(z_l=z_l, device=device)
+            z_l = block.reverse(T=T,z_l=z_l, device=device)
         return z_l
 
     @torch.no_grad()
-    def sample(self, device, num_samples=1, z_base_sample=None):
+    def sample(self, device, num_samples=1,T=1. , z_base_sample=None):
         # TODO refactor this
         """
         if z_samples are provided, use that as the base tensor, if not sample from normal.
         z_samples can be provided in order to see how the model generates images over the course of training.
         """
+        logging.info(f"using temperature {T} for sampling")
         if z_base_sample is None:
             num_channels, height, width = self.output_shape
             sample_size = [num_samples, num_channels, height, width]
             z_base_sample = self.normal.sample(sample_shape=sample_size)
-        # else:
-        #     # # z_sample zero'th dimention is the sample size
-        #     # assert (
-        #     #     torch.equal(z_base_sample.shape[1:], self.output_shape)
-        #     # ), f"{z_base_sample.shape[1:]} vs {self.output_shape}"
+        z_base_sample = z_base_sample * T #  apply temperature
         z_base_sample = z_base_sample.to(device)
-        generated_image = self.reverse(z_base_sample, device=device)
+        generated_image = self.reverse(z_base_sample, T=T, device=device)
         return generated_image

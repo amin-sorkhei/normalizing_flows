@@ -58,11 +58,11 @@ def check_point_model(model, epoch, optimizer, loss, path):
     )
 
 
-def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False):
-    logging.info(
-        f"min_value {generated_image.min()} and max_value {generated_image.max()} in the generated image"
-    )
-    generated_image = torch.clamp(generated_image, min=0, max=1)
+def save_plot(n_row, n_column, generated_image, epoch, path, fixed_image=False, verbose=False):
+    if verbose is True:
+        logging.info(
+            f"min_value {generated_image.min()} and max_value {generated_image.max()} in the generated image"
+        )
     fig, ax = plt.subplots(n_row, n_column, squeeze=True)
     fig.subplots_adjust(wspace=0.02, hspace=0.02)
     for i in range(0, n_row):
@@ -131,7 +131,6 @@ class GlowAffineCouplingLayer(torch.nn.Module):
             kernel_size=3,
             padding="same",
         )
-        torch.manual_seed(41)
         self.first_layer.weight.data.normal_(0, 0.05)
         self.first_layer.bias.data.zero_()
 
@@ -141,7 +140,6 @@ class GlowAffineCouplingLayer(torch.nn.Module):
             padding="same",
             kernel_size=1,
         )
-        torch.manual_seed(41)
         self.second_layer.weight.data.normal_(0, 0.05)
         self.second_layer.bias.data.zero_()
 
@@ -590,7 +588,6 @@ class Invertibe1by1Convolution(torch.nn.Module):
     def __init__(self, num_channels) -> None:
         super().__init__()
         self.num_channels = num_channels
-        torch.manual_seed(41)
         random_weight = torch.randn(size=[self.num_channels, self.num_channels])
         rotation_w, _ = torch.linalg.qr(random_weight)
         rotation_w = rotation_w.unsqueeze(2).unsqueeze(3)

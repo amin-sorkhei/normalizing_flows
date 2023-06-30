@@ -134,19 +134,19 @@ class GlowBlock(torch.nn.Module):
 
         return x_i, total_logdet, z_i, z_log_prob
 
-    def reverse(self, z_l, device=torch.device("cpu")):
+    def reverse(self, z_l,T=1., device=torch.device("cpu")):
         """reverse operation
 
         Args:
-            z_l (_type_): tensorf coming previous transformations
+            z_l (torch.Tensor): tensor coming previous transformations
+            T: (float) temperature used for sampling
 
         """
         if self.is_final_block is False:
             prior_params = self.prior(z_l)
             mu, log_sigma = torch.chunk(prior_params, chunks=2, dim=1)
             sigma = torch.exp(log_sigma)
-            torch.manual_seed(42)
-            z_i = td.Normal(0, 1).sample(sample_shape=z_l.shape).to(device) * sigma + mu
+            z_i = td.Normal(0, 1).sample(sample_shape=z_l.shape).to(device) * T * sigma + mu
             z = torch.concat([z_l, z_i], dim=1)
 
         else:

@@ -127,18 +127,40 @@ def train(
             input_shape=model.output_shape,
         )
     loss_per_epoch = []
+    n_row, n_column = (
+            sampling_params.num_samples_nrow,
+            sampling_params.num_samples_ncols,
+        )
     for e in range(epoch_start, epoch_end):
         loss_per_bath = []
         epoch_start_time = time.time()
         for i, data in enumerate(dataset):
             image_batch = data[0]  # we only need the image, hence [0]
             image_batch = add_noise(image_batch, n_bits=model_params.n_bits).to(device)
+            if i == 0:
+                with torch.no_grad():
+                    logging.info("initializing the model")
+                    z_l, _, _, _ = model(image_batch)
+                    model.output_shape = z_l.shape[1:]
+                    logging.info(f"initialization completed with outputshape: {model.output_shape}") 
+                    continue
+            
             optimizer.zero_grad()
             z_L, loss, total_log_prob, total_logdet = model(image_batch)
             loss.backward()
             optimizer.step()
-            if i % 99 == 0:
+            if i % 100 == 0:
                 logging.info(f"epcoh {e}, batch {i}, loss {loss}, total_log_prob {total_log_prob}, total_logdet {total_logdet}")
+                generated_image = model.sample(
+                    num_samples=n_row * n_column, z_base_sample=None, device=device
+                ).view(n_row, n_column, 3, 64, 64).clamp(-.5, +.5) + .5
+                save_plot(
+                    n_row=n_row,
+                    n_column=n_column,
+                    path=sampling_params.samples_output_path,
+                    generated_image=generated_image,
+                    epoch=f"{e}_batch_{i}",
+                    fixed_image=False)
             loss_per_bath.append(loss)
 
         epoch_loss = torch.Tensor(loss_per_bath).mean()
@@ -163,13 +185,11 @@ def train(
             )
 
         model.eval()
-        n_row, n_column = (
-            sampling_params.num_samples_nrow,
-            sampling_params.num_samples_ncols,
-        )
+       
         generated_image = model.sample(
             num_samples=n_row * n_column, z_base_sample=None, device=device
-        ).view(n_row, n_column, 3, 64, 64)
+        ).view(n_row, n_column, 3, 64, 64).clamp(-.5, +.5) + .5
+
         save_plot(
             n_row=n_row,
             n_column=n_column,
