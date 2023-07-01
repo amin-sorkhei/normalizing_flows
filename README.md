@@ -18,6 +18,7 @@ python3 -m pip venev normalizing_flows_env
 ```
 activate the above environment and install the package by (use `-e` if you are planning to develop new code)
 ```
+python3 -m pip install -r requirements.txt
 python3 -m pip install -e .
 ```
 
