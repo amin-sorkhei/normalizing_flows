@@ -9,16 +9,19 @@ model_params:
 train_params:
   lr: 1.e-4
   epochs: 100
-  model_checkpoint_path: "./model_checkpoints/"
+  model_checkpoint_path: ./model_checkpoints/
 
 data_params:
   num_samples: -1
-  batch_size: 16
+  batch_size: 32
   num_workers: 0
   dataset_name: CelebA # CelebA or lsun_bedroom
 
-sampling_params:
+sampling_params: # in case of resume_training task, seed needs to be provided
   num_samples_nrow: 5
   num_samples_ncols: 5
+  seed: 42
+  trainig_sampling_frequency: 100 # samply after how many batches
+  T: .7 # temperature for sampling
   generate_fixed_images: False
-  samples_output_path: ./samples/glow_CelebA_64*64_L4_K32_tmp
+  samples_output_path: ./samples/glow_CelebA_64*64_L3_K32
