@@ -1,4 +1,4 @@
-# normalizing_flows
+# Normalizing Flows (GLOW)
 
 PyTorch implementation for [Glow: Generative Flow with Invertible 1x1 Convolutions](https://arxiv.org/abs/1807.03039).
 
