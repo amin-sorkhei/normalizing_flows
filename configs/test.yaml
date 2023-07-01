@@ -1,13 +1,15 @@
 
 model_params:
-  num_resnet_blocks: 1
-  num_scales: 1 #L split happens after each scale
-  num_step_of_flow: 1 # K each flow step has 6 affine coupling layers
+  model_type: glow
+  num_resnet_blocks: 1 # will be ignored in case of glow
+  num_scales: 3 #L split happens after each block
+  num_step_of_flow: 32 # K each flow step (in case of RealNVP it has 6 affine coupling layers)
+  n_bits:  5
 
 train_params:
   lr: 1.e-3
   epochs: 5
-  model_checkpoint_path: "./tmp/model_checkpoints/"
+  model_checkpoint_path: "./tmp/model_checkpoints/20230624_194026"
 
 data_params:
   num_samples: 128
@@ -15,8 +17,10 @@ data_params:
   num_workers: 1
   dataset_name: CelebA # or lsun_bedroom
 
-sampling_params:
+sampling_params: # in case of resume_training task, seed needs to be provided
   num_samples_nrow: 5
   num_samples_ncols: 5
-  generate_fixed_images: True
-  samples_output_path: ./tmp/samples/
+  seed: 42
+  trainig_sampling_frequency: 100 # samply after how many batches
+  T: .7 # temperature for sampling
+  samples_output_path: ./tmp/samples/20230624_194026
