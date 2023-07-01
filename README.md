@@ -36,3 +36,6 @@ If you want to resume training from a model checkpoint. Keep in mind:
 ```
 python3 ./normalizing_flows/train.py --task resume_training --config_path ./configs/[test.yaml | medium.yaml] --device cuda:0
 ```
+
+# Sampling
+Please refer to `demo/demo.ipynb`.
